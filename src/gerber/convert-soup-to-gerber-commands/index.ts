@@ -117,11 +117,12 @@ export const convertSoupToGerberCommands = (
   opts.flip_y_axis ??= false
   const hasPanel = circuitJson.some((e) => e.type === "pcb_panel")
   const layerCount = getLayerCount(circuitJson)
-  const boardExtents = hasPanel
-    ? undefined
-    : getBoardExtents(
-        circuitJson.find((element) => element.type === "pcb_board"),
-      )
+  let boardExtents: ReturnType<typeof getBoardExtents> | undefined
+  if (!hasPanel) {
+    boardExtents = getBoardExtents(
+      circuitJson.find((element) => element.type === "pcb_board"),
+    )
+  }
   const innerLayerRefs = getInnerLayerRefs(layerCount)
   const copperLayerRefs = ["top", ...innerLayerRefs, "bottom"] as LayerRef[]
   const fabricationLayerRefs = getFabricationLayerRefs(circuitJson)
@@ -1521,10 +1522,10 @@ export const convertSoupToGerberCommands = (
           })
 
           const el = element as PcbCutout
-          const circleEdgeSide =
-            boardExtents && el.shape === "circle"
-              ? getCircleCutoutEdgeSide(el, boardExtents)
-              : undefined
+          let circleEdgeSide: ReturnType<typeof getCircleCutoutEdgeSide>
+          if (boardExtents && el.shape === "circle") {
+            circleEdgeSide = getCircleCutoutEdgeSide(el, boardExtents)
+          }
 
           if (el.shape === "rect") {
             const { center, width, height, rotation, corner_radius } = el
@@ -1642,49 +1643,36 @@ export const convertSoupToGerberCommands = (
             const { center, radius } = el
 
             if (circleEdgeSide) {
-              if (circleEdgeSide === "left" || circleEdgeSide === "right") {
-                const topPoint = { x: center.x, y: center.y + radius }
-                const bottomPoint = { x: center.x, y: center.y - radius }
-                cutout_builder
-                  .add("move_operation", {
-                    x: topPoint.x,
-                    y: mfy(topPoint.y),
-                  })
-                  .add(
-                    (circleEdgeSide === "left") !== opts.flip_y_axis
-                      ? "set_movement_mode_to_clockwise_circular"
-                      : "set_movement_mode_to_counterclockwise_circular",
-                    {},
-                  )
-                  .add("plot_operation", {
-                    x: bottomPoint.x,
-                    y: mfy(bottomPoint.y),
-                    i: 0,
-                    j: mfy(center.y) - mfy(topPoint.y),
-                  })
-                  .add("set_movement_mode_to_linear", {})
-              } else {
-                const leftPoint = { x: center.x - radius, y: center.y }
-                const rightPoint = { x: center.x + radius, y: center.y }
-                cutout_builder
-                  .add("move_operation", {
-                    x: leftPoint.x,
-                    y: mfy(leftPoint.y),
-                  })
-                  .add(
-                    (circleEdgeSide === "bottom") !== opts.flip_y_axis
-                      ? "set_movement_mode_to_counterclockwise_circular"
-                      : "set_movement_mode_to_clockwise_circular",
-                    {},
-                  )
-                  .add("plot_operation", {
-                    x: rightPoint.x,
-                    y: mfy(rightPoint.y),
-                    i: center.x - leftPoint.x,
-                    j: 0,
-                  })
-                  .add("set_movement_mode_to_linear", {})
+              const isVerticalEdge =
+                circleEdgeSide === "left" || circleEdgeSide === "right"
+              let start = { x: center.x - radius, y: center.y }
+              let end = { x: center.x + radius, y: center.y }
+              if (isVerticalEdge) {
+                start = { x: center.x, y: center.y + radius }
+                end = { x: center.x, y: center.y - radius }
               }
+              const useClockwise =
+                isVerticalEdge ===
+                ((circleEdgeSide === "left" || circleEdgeSide === "top") !==
+                  opts.flip_y_axis)
+              let movementMode:
+                | "set_movement_mode_to_clockwise_circular"
+                | "set_movement_mode_to_counterclockwise_circular" =
+                "set_movement_mode_to_counterclockwise_circular"
+              if (useClockwise) {
+                movementMode = "set_movement_mode_to_clockwise_circular"
+              }
+
+              cutout_builder
+                .add("move_operation", { x: start.x, y: mfy(start.y) })
+                .add(movementMode, {})
+                .add("plot_operation", {
+                  x: end.x,
+                  y: mfy(end.y),
+                  i: center.x - start.x,
+                  j: mfy(center.y) - mfy(start.y),
+                })
+                .add("set_movement_mode_to_linear", {})
             } else {
               // To draw a circle, we draw two semi-circles
               const p1 = { x: center.x + radius, y: center.y }
