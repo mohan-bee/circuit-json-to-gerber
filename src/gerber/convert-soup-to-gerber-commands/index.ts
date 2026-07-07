@@ -1,47 +1,47 @@
-import type { AnyCircuitElement, PcbPlatedHole } from "circuit-json"
-import { pairs } from "../utils/pairs"
-import { gerberBuilder } from "../gerber-builder"
-import type { LayerToGerberCommandsMap } from "./GerberLayerName"
-import { defineCommonMacros } from "./define-common-macros"
-import {
-  defineAperturesForLayer,
-  REGION_APERTURE_CONFIG,
-  getApertureConfigFromCirclePcbHole,
-  getApertureConfigFromPcbPlatedHole,
-  getApertureConfigFromPcbPlatedHoleSoldermask,
-  getApertureConfigFromCirclePcbHoleSoldermask,
-  getApertureConfigFromPcbCopperText,
-  getApertureConfigFromPcbFabricationNotePath,
-  getApertureConfigFromPcbFabricationNoteText,
-  getApertureConfigFromPcbSilkscreenPath,
-  getApertureConfigFromPcbSilkscreenText,
-  getApertureConfigFromPcbSmtpad,
-  getApertureConfigFromPcbSmtpadSoldermask,
-  getApertureConfigFromPcbSolderPaste,
-  getApertureConfigFromOuterDiameter,
-} from "./defineAperturesForLayer"
-import type { PcbCutout } from "circuit-json"
-import { findApertureNumber } from "./findApertureNumber"
-import { getCommandHeaders } from "./getCommandHeaders"
-import { getGerberLayerName } from "./getGerberLayerName"
-import { offsetPolygonOutline } from "./offsetPolygonOutline"
 import { lineAlphabet } from "@tscircuit/alphabet"
+import type { AnyCircuitElement, PcbPlatedHole } from "circuit-json"
+import type { PcbCutout } from "circuit-json"
+import type { LayerRef } from "circuit-json"
 import {
+  type Matrix,
   applyToPoint,
   compose,
   identity,
   rotate,
   translate,
-  type Matrix,
 } from "transformation-matrix"
 import type { AnyGerberCommand } from "../any_gerber_command"
-import type { LayerRef } from "circuit-json"
+import { gerberBuilder } from "../gerber-builder"
+import { pairs } from "../utils/pairs"
+import type { LayerToGerberCommandsMap } from "./GerberLayerName"
+import { defineCommonMacros } from "./define-common-macros"
+import {
+  REGION_APERTURE_CONFIG,
+  defineAperturesForLayer,
+  getApertureConfigFromCirclePcbHole,
+  getApertureConfigFromCirclePcbHoleSoldermask,
+  getApertureConfigFromOuterDiameter,
+  getApertureConfigFromPcbCopperText,
+  getApertureConfigFromPcbFabricationNotePath,
+  getApertureConfigFromPcbFabricationNoteText,
+  getApertureConfigFromPcbPlatedHole,
+  getApertureConfigFromPcbPlatedHoleSoldermask,
+  getApertureConfigFromPcbSilkscreenPath,
+  getApertureConfigFromPcbSilkscreenText,
+  getApertureConfigFromPcbSmtpad,
+  getApertureConfigFromPcbSmtpadSoldermask,
+  getApertureConfigFromPcbSolderPaste,
+} from "./defineAperturesForLayer"
 import {
   getFabricationLayerRefs,
   isOuterLayerRef,
   outerLayerRefs,
 } from "./fabricationLayerRefs"
+import { findApertureNumber } from "./findApertureNumber"
+import { getCommandHeaders } from "./getCommandHeaders"
 import { getFabRectPoints } from "./getFabRectPoints"
+import { getGerberLayerName } from "./getGerberLayerName"
+import { offsetPolygonOutline } from "./offsetPolygonOutline"
 import { renderFabricationDimension } from "./renderFabricationDimension"
 import { renderOpenPath } from "./renderOpenPath"
 
@@ -63,6 +63,127 @@ const getGerberInnerLayerName = (layerRef: LayerRef) => {
   return `In${layerRef.replace("inner", "")}_Cu` as const
 }
 
+const getPointExtents = (points: Array<{ x: number; y: number }>) => ({
+  minX: Math.min(...points.map((point) => point.x)),
+  maxX: Math.max(...points.map((point) => point.x)),
+  minY: Math.min(...points.map((point) => point.y)),
+  maxY: Math.max(...points.map((point) => point.y)),
+})
+
+const getBoardExtents = (circuitJson: AnyCircuitElement[]) => {
+  const board = circuitJson.find((element) => element.type === "pcb_board")
+
+  if (!board) return undefined
+  if ("outline" in board && board.outline?.length) {
+    return getPointExtents(board.outline)
+  }
+  if (
+    "center" in board &&
+    "width" in board &&
+    "height" in board &&
+    board.center &&
+    typeof board.width === "number" &&
+    typeof board.height === "number"
+  ) {
+    return {
+      minX: board.center.x - board.width / 2,
+      maxX: board.center.x + board.width / 2,
+      minY: board.center.y - board.height / 2,
+      maxY: board.center.y + board.height / 2,
+    }
+  }
+
+  return undefined
+}
+
+const getCutoutExtents = (cutout: PcbCutout) => {
+  switch (cutout.shape) {
+    case "circle":
+      return {
+        minX: cutout.center.x - cutout.radius,
+        maxX: cutout.center.x + cutout.radius,
+        minY: cutout.center.y - cutout.radius,
+        maxY: cutout.center.y + cutout.radius,
+      }
+    case "polygon":
+      return getPointExtents(cutout.points)
+    case "path": {
+      const extents = getPointExtents(cutout.route)
+      const padding = cutout.slot_width / 2
+      return {
+        minX: extents.minX - padding,
+        maxX: extents.maxX + padding,
+        minY: extents.minY - padding,
+        maxY: extents.maxY + padding,
+      }
+    }
+    case "rect": {
+      const { center, width, height, rotation } = cutout
+      const w = width / 2
+      const h = height / 2
+      const points = [
+        { x: -w, y: h },
+        { x: w, y: h },
+        { x: w, y: -h },
+        { x: -w, y: -h },
+      ]
+      let transformMatrix = identity()
+      if (rotation) {
+        transformMatrix = rotate((rotation * Math.PI) / 180)
+      }
+      transformMatrix = compose(translate(center.x, center.y), transformMatrix)
+
+      return getPointExtents(
+        points.map((point) => applyToPoint(transformMatrix, point)),
+      )
+    }
+  }
+}
+
+const isContainedByExtents = (
+  inner: ReturnType<typeof getPointExtents>,
+  outer: ReturnType<typeof getPointExtents>,
+) => {
+  const epsilon = 1e-9
+  return (
+    inner.minX >= outer.minX - epsilon &&
+    inner.maxX <= outer.maxX + epsilon &&
+    inner.minY >= outer.minY - epsilon &&
+    inner.maxY <= outer.maxY + epsilon
+  )
+}
+
+const getCircleCutoutEdgeSide = (
+  cutout: Extract<PcbCutout, { shape: "circle" }>,
+  boardExtents: ReturnType<typeof getPointExtents>,
+) => {
+  const epsilon = 1e-9
+  if (
+    cutout.center.x <= boardExtents.minX + epsilon &&
+    cutout.center.x + cutout.radius > boardExtents.minX + epsilon
+  ) {
+    return "left"
+  }
+  if (
+    cutout.center.x >= boardExtents.maxX - epsilon &&
+    cutout.center.x - cutout.radius < boardExtents.maxX - epsilon
+  ) {
+    return "right"
+  }
+  if (
+    cutout.center.y <= boardExtents.minY + epsilon &&
+    cutout.center.y + cutout.radius > boardExtents.minY + epsilon
+  ) {
+    return "bottom"
+  }
+  if (
+    cutout.center.y >= boardExtents.maxY - epsilon &&
+    cutout.center.y - cutout.radius < boardExtents.maxY - epsilon
+  ) {
+    return "top"
+  }
+}
+
 /**
  * Converts Circuit JSON to arrays of Gerber commands for each layer
  */
@@ -73,6 +194,7 @@ export const convertSoupToGerberCommands = (
   opts.flip_y_axis ??= false
   const hasPanel = circuitJson.some((e) => e.type === "pcb_panel")
   const layerCount = getLayerCount(circuitJson)
+  const boardExtents = getBoardExtents(circuitJson)
   const innerLayerRefs = getInnerLayerRefs(layerCount)
   const copperLayerRefs = ["top", ...innerLayerRefs, "bottom"] as LayerRef[]
   const fabricationLayerRefs = getFabricationLayerRefs(circuitJson)
@@ -1472,6 +1594,18 @@ export const convertSoupToGerberCommands = (
           })
 
           const el = element as PcbCutout
+          const isCutoutFullyInsideBoard =
+            !boardExtents ||
+            isContainedByExtents(getCutoutExtents(el), boardExtents)
+          const circleEdgeSide =
+            boardExtents && el.shape === "circle"
+              ? getCircleCutoutEdgeSide(el, boardExtents)
+              : undefined
+          if (!isCutoutFullyInsideBoard && !circleEdgeSide) {
+            // Off-board cutouts require boolean outline merging; a closed
+            // standalone contour makes stackup renderers grow the board.
+            continue
+          }
 
           if (el.shape === "rect") {
             const { center, width, height, rotation, corner_radius } = el
@@ -1588,31 +1722,77 @@ export const convertSoupToGerberCommands = (
           } else if (el.shape === "circle") {
             const { center, radius } = el
 
-            // To draw a circle, we draw two semi-circles
-            const p1 = { x: center.x + radius, y: center.y }
-            const p2 = { x: center.x - radius, y: center.y }
+            if (circleEdgeSide) {
+              if (circleEdgeSide === "left" || circleEdgeSide === "right") {
+                const topPoint = { x: center.x, y: center.y + radius }
+                const bottomPoint = { x: center.x, y: center.y - radius }
+                cutout_builder
+                  .add("move_operation", {
+                    x: topPoint.x,
+                    y: mfy(topPoint.y),
+                  })
+                  .add(
+                    circleEdgeSide === "left"
+                      ? "set_movement_mode_to_clockwise_circular"
+                      : "set_movement_mode_to_counterclockwise_circular",
+                    {},
+                  )
+                  .add("plot_operation", {
+                    x: bottomPoint.x,
+                    y: mfy(bottomPoint.y),
+                    i: 0,
+                    j: mfy(center.y) - mfy(topPoint.y),
+                  })
+                  .add("set_movement_mode_to_linear", {})
+              } else {
+                const leftPoint = { x: center.x - radius, y: center.y }
+                const rightPoint = { x: center.x + radius, y: center.y }
+                cutout_builder
+                  .add("move_operation", {
+                    x: leftPoint.x,
+                    y: mfy(leftPoint.y),
+                  })
+                  .add(
+                    circleEdgeSide === "bottom"
+                      ? "set_movement_mode_to_counterclockwise_circular"
+                      : "set_movement_mode_to_clockwise_circular",
+                    {},
+                  )
+                  .add("plot_operation", {
+                    x: rightPoint.x,
+                    y: mfy(rightPoint.y),
+                    i: center.x - leftPoint.x,
+                    j: 0,
+                  })
+                  .add("set_movement_mode_to_linear", {})
+              }
+            } else {
+              // To draw a circle, we draw two semi-circles
+              const p1 = { x: center.x + radius, y: center.y }
+              const p2 = { x: center.x - radius, y: center.y }
 
-            cutout_builder
-              .add("move_operation", {
-                x: p1.x,
-                y: mfy(p1.y),
-              })
-              .add("set_movement_mode_to_counterclockwise_circular", {})
-              // Draw the first semi-circle (top half if we start from rightmost point)
-              .add("plot_operation", {
-                x: p2.x,
-                y: mfy(p2.y),
-                i: -radius,
-                j: 0,
-              })
-              // Draw the second semi-circle (bottom half)
-              .add("plot_operation", {
-                x: p1.x,
-                y: mfy(p1.y),
-                i: radius,
-                j: 0,
-              })
-              .add("set_movement_mode_to_linear", {})
+              cutout_builder
+                .add("move_operation", {
+                  x: p1.x,
+                  y: mfy(p1.y),
+                })
+                .add("set_movement_mode_to_counterclockwise_circular", {})
+                // Draw the first semi-circle (top half if we start from rightmost point)
+                .add("plot_operation", {
+                  x: p2.x,
+                  y: mfy(p2.y),
+                  i: -radius,
+                  j: 0,
+                })
+                // Draw the second semi-circle (bottom half)
+                .add("plot_operation", {
+                  x: p1.x,
+                  y: mfy(p1.y),
+                  i: radius,
+                  j: 0,
+                })
+                .add("set_movement_mode_to_linear", {})
+            }
           } else if (el.shape === "polygon") {
             const { points } = el
             if (points.length > 0) {
