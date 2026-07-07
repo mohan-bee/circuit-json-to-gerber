@@ -1641,37 +1641,6 @@ export const convertSoupToGerberCommands = (
             }
           } else if (el.shape === "circle") {
             const { center, radius } = el
-            const drawArc = ({
-              start,
-              end,
-              i,
-              j,
-              clockwise,
-            }: {
-              start: { x: number; y: number }
-              end: { x: number; y: number }
-              i: number
-              j: number
-              clockwise: boolean
-            }) => {
-              let movementMode:
-                | "set_movement_mode_to_clockwise_circular"
-                | "set_movement_mode_to_counterclockwise_circular" =
-                "set_movement_mode_to_counterclockwise_circular"
-              if (clockwise) {
-                movementMode = "set_movement_mode_to_clockwise_circular"
-              }
-
-              cutout_builder
-                .add("move_operation", { x: start.x, y: mfy(start.y) })
-                .add(movementMode, {})
-                .add("plot_operation", {
-                  x: end.x,
-                  y: mfy(end.y),
-                  i,
-                  j,
-                })
-            }
 
             if (circleEdgeSide) {
               const isVerticalEdge =
@@ -1686,34 +1655,51 @@ export const convertSoupToGerberCommands = (
                 isVerticalEdge ===
                 ((circleEdgeSide === "left" || circleEdgeSide === "top") !==
                   opts.flip_y_axis)
-              drawArc({
-                start,
-                end,
-                i: center.x - start.x,
-                j: mfy(center.y) - mfy(start.y),
-                clockwise: useClockwise,
-              })
+              let movementMode:
+                | "set_movement_mode_to_clockwise_circular"
+                | "set_movement_mode_to_counterclockwise_circular" =
+                "set_movement_mode_to_counterclockwise_circular"
+              if (useClockwise) {
+                movementMode = "set_movement_mode_to_clockwise_circular"
+              }
+
+              cutout_builder
+                .add("move_operation", { x: start.x, y: mfy(start.y) })
+                .add(movementMode, {})
+                .add("plot_operation", {
+                  x: end.x,
+                  y: mfy(end.y),
+                  i: center.x - start.x,
+                  j: mfy(center.y) - mfy(start.y),
+                })
+                .add("set_movement_mode_to_linear", {})
             } else {
               // To draw a circle, we draw two semi-circles
               const p1 = { x: center.x + radius, y: center.y }
               const p2 = { x: center.x - radius, y: center.y }
 
-              drawArc({
-                start: p1,
-                end: p2,
-                i: -radius,
-                j: 0,
-                clockwise: false,
-              })
-              drawArc({
-                start: p2,
-                end: p1,
-                i: radius,
-                j: 0,
-                clockwise: false,
-              })
+              cutout_builder
+                .add("move_operation", {
+                  x: p1.x,
+                  y: mfy(p1.y),
+                })
+                .add("set_movement_mode_to_counterclockwise_circular", {})
+                // Draw the first semi-circle (top half if we start from rightmost point)
+                .add("plot_operation", {
+                  x: p2.x,
+                  y: mfy(p2.y),
+                  i: -radius,
+                  j: 0,
+                })
+                // Draw the second semi-circle (bottom half)
+                .add("plot_operation", {
+                  x: p1.x,
+                  y: mfy(p1.y),
+                  i: radius,
+                  j: 0,
+                })
+                .add("set_movement_mode_to_linear", {})
             }
-            cutout_builder.add("set_movement_mode_to_linear", {})
           } else if (el.shape === "polygon") {
             const { points } = el
             if (points.length > 0) {
